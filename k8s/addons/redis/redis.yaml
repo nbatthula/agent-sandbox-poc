@@ -1,0 +1,82 @@
+# Redis for session persistence and task queue
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redis
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: redis
+data:
+  redis.conf: |
+    maxmemory 256mb
+    maxmemory-policy allkeys-lru
+    save 900 1
+    save 300 10
+    save 60 10000
+    appendonly yes
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        command: ["redis-server", "/etc/redis/redis.conf"]
+        ports:
+        - containerPort: 6379
+        volumeMounts:
+        - name: config
+          mountPath: /etc/redis
+        - name: data
+          mountPath: /data
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        livenessProbe:
+          tcpSocket:
+            port: 6379
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command: ["redis-cli", "ping"]
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: config
+        configMap:
+          name: redis-config
+      - name: data
+        emptyDir: {}  # Use PVC in production
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: redis
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+  clusterIP: None  # Headless for direct pod access

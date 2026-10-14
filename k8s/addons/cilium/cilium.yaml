@@ -1,0 +1,201 @@
+# Cilium CNI with NetworkPolicies for egress control
+# Install via Helm (recommended) or apply these manifests
+# For Rancher Desktop: disable built-in CNI (flannel) first
+
+---
+# Cilium NetworkPolicy for sandbox egress control
+# This allows sandboxes to only access approved external endpoints
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: sandbox-egress-control
+  namespace: default
+spec:
+  endpointSelector:
+    matchLabels:
+      sandbox: "true"  # Applied via SandboxTemplate
+  egress:
+  # Allow DNS resolution
+  - toEndpoints:
+    - matchLabels:
+        k8s:io.kubernetes.pod.namespace: kube-system
+        k8s:k8s-app: kube-dns
+    toPorts:
+    - ports:
+      - port: "53"
+        protocol: UDP
+      - port: "53"
+        protocol: TCP
+  # Allow Kubernetes API
+  - toEndpoints:
+    - matchLabels:
+        k8s:io.kubernetes.pod.namespace: kube-system
+        k8s:k8s-app: kubernetes
+    toPorts:
+    - ports:
+      - port: "443"
+        protocol: TCP
+  # Allow Redis (session store)
+  - toEndpoints:
+    - matchLabels:
+        k8s:io.kubernetes.pod.namespace: redis
+        app: redis
+    toPorts:
+    - ports:
+      - port: "6379"
+        protocol: TCP
+  # Allow PostgreSQL (metadata)
+  - toEndpoints:
+    - matchLabels:
+        k8s:io.kubernetes.pod.namespace: postgres
+        app: postgres
+    toPorts:
+    - ports:
+      - port: "5432"
+        protocol: TCP
+  # Allow specific external APIs (configure per-sandbox via labels)
+  # Example: GitHub API
+  - toCIDR:
+    - cidr: 140.82.112.0/20  # GitHub API (update as needed)
+    toPorts:
+    - ports:
+      - port: "443"
+        protocol: TCP
+  # Example: PyPI
+  - toCIDR:
+    - cidr: 151.101.0.0/16  # Fastly/PyPI (update as needed)
+    toPorts:
+    - ports:
+      - port: "443"
+        protocol: TCP
+  # Deny all other egress (default deny)
+---
+# CiliumNetworkPolicy for orchestrator
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: orchestrator-egress
+  namespace: orchestrator-system
+spec:
+  endpointSelector:
+    matchLabels:
+      app: orchestrator
+  egress:
+  - toEndpoints:
+    - matchLabels:
+        k8s:io.kubernetes.pod.namespace: kube-system
+        k8s:k8s-app: kube-dns
+    toPorts:
+    - ports:
+      - port: "53"
+        protocol: UDP
+  - toEndpoints:
+    - matchLabels:
+        k8s:io.kubernetes.pod.namespace: redis
+        app: redis
+    toPorts:
+    - ports:
+      - port: "6379"
+        protocol: TCP
+  - toEndpoints:
+    - matchLabels:
+        k8s:io.kubernetes.pod.namespace: postgres
+        app: postgres
+    toPorts:
+    - ports:
+      - port: "5432"
+        protocol: TCP
+  - toEndpoints:
+    - matchLabels:
+        k8s:io.kubernetes.pod.namespace: kube-system
+        k8s:k8s-app: kubernetes
+    toPorts:
+    - ports:
+      - port: "443"
+        protocol: TCP
+---
+# L7 HTTP policy for sandbox API access control
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: sandbox-http-egress
+  namespace: default
+spec:
+  endpointSelector:
+    matchLabels:
+      sandbox: "true"
+  egress:
+  - toEndpoints:
+    - matchLabels:
+        k8s:io.kubernetes.pod.namespace: redis
+        app: redis
+    toPorts:
+    - ports:
+      - port: "6379"
+        protocol: TCP
+    rules:
+      http:
+      - method: "GET"
+        path: "/session/*"
+      - method: "POST"
+        path: "/checkpoint"
+  - toEndpoints:
+    - matchLabels:
+        k8s:io.kubernetes.pod.namespace: postgres
+        app: postgres
+    toPorts:
+    - ports:
+      - port: "5432"
+        protocol: TCP
+---
+# Installation notes
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cilium-install-notes
+  namespace: kube-system
+data:
+  INSTALL.md: |
+    # Cilium Installation on Rancher Desktop
+    
+    ## Disable Built-in Flannel
+    In Rancher Desktop Settings → Kubernetes → Advanced:
+    - Uncheck "Deploy flannel CNI"
+    
+    ## Install Cilium via Helm
+    ```bash
+    helm repo add cilium https://helm.cilium.io/
+    helm repo update
+    
+    helm install cilium cilium/cilium --version 1.15.5 \
+      --namespace kube-system \
+      --set kubeProxyReplacement=true \
+      --set k8sServiceHost=localhost \
+      --set k8sServicePort=6443 \
+      --set hubble.enabled=true \
+      --set hubble.relay.enabled=true \
+      --set hubble.ui.enabled=true \
+      --set operator.replicas=1 \
+      --set ipam.mode=kubernetes \
+      --set endpointHealthChecking.enabled=true
+    ```
+    
+    ## Verify
+    ```bash
+    kubectl get pods -n kube-system -l k8s-app=cilium
+    cilium status --wait
+    ```
+    
+    ## Apply NetworkPolicies
+    ```bash
+    kubectl apply -f k8s/addons/cilium/cilium.yaml
+    ```
+    
+    ## Test Egress Control
+    ```bash
+    # Should work - allowed
+    kubectl run test --image=curlimages/curl --rm -it -- curl https://api.github.com
+    
+    # Should fail - denied
+    kubectl run test --image=curlimages/curl --rm -it -- curl https://example.com
+    ```

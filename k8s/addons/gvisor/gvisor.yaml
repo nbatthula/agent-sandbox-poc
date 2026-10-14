@@ -1,0 +1,136 @@
+# gVisor RuntimeClass for sandbox isolation
+# This creates the RuntimeClass that sandboxes can reference
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+---
+# DaemonSet to install runsc on all nodes (for k3s/Rancher Desktop)
+# Note: This requires privileged access and may not work on all k3s setups
+# Alternative: Install runsc manually on the Rancher Desktop VM
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gvisor-installer
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: gvisor-installer
+  template:
+    metadata:
+      labels:
+        app: gvisor-installer
+    spec:
+      hostPID: true
+      hostNetwork: true
+      tolerations:
+      - operator: Exists
+      initContainers:
+      - name: install-runsc
+        image: gcr.io/gvisor-dev/runsc:latest
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          # Install runsc to host
+          cp /runsc /host/usr/local/bin/runsc
+          chmod +x /host/usr/local/bin/runsc
+          
+          # Verify installation
+          /host/usr/local/bin/runsc --version
+          
+          # Configure containerd to use runsc (for k3s)
+          # This creates the containerd config patch
+          mkdir -p /host/etc/rancher/k3s
+          cat > /host/etc/rancher/k3s/registries.yaml <<'EOF'
+          mirrors:
+            docker.io:
+              endpoint:
+                - "https://registry-1.docker.io"
+EOF
+          
+          # Create containerd config for runsc
+          mkdir -p /host/var/lib/rancher/k3s/agent/etc/containerd
+          cat > /host/var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl <<'EOF'
+          version = 2
+          [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
+            [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+              runtime_type = "io.containerd.runsc.v1"
+              [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc.options]
+                SystemdCgroup = true
+EOF
+          
+          echo "runsc installed. Restart containerd to activate."
+        volumeMounts:
+        - name: host-bin
+          mountPath: /host/usr/local/bin
+        - name: host-etc
+          mountPath: /host/etc/rancher/k3s
+        - name: containerd-config
+          mountPath: /host/var/lib/rancher/k3s/agent/etc/containerd
+        securityContext:
+          privileged: true
+      containers:
+      - name: pause
+        image: registry.k8s.io/pause:3.9
+        command: ["/pause"]
+      volumes:
+      - name: host-bin
+        hostPath:
+          path: /usr/local/bin
+      - name: host-etc
+        hostPath:
+          path: /etc/rancher/k3s
+      - name: containerd-config
+        hostPath:
+          path: /var/lib/rancher/k3s/agent/etc/containerd
+---
+# Alternative: Manual gVisor installation instructions (ConfigMap for docs)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gvisor-install-notes
+  namespace: kube-system
+data:
+  INSTALL.md: |
+    # Manual gVisor Installation on Rancher Desktop
+    
+    ## Option 1: Via Lima VM (Recommended)
+    ```bash
+    # SSH into the Rancher Desktop Lima VM
+    limactl shell rancher-desktop
+    
+    # Install runsc
+    curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list
+    sudo apt-get update && sudo apt-get install -y runsc
+    
+    # Configure containerd for runsc
+    sudo mkdir -p /etc/containerd
+    cat <<EOF | sudo tee /etc/containerd/config.toml
+    version = 2
+    [plugins."io.containerd.grpc.v1.cri".containerd.runtimes]
+      [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+        runtime_type = "io.containerd.runsc.v1"
+        [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc.options]
+          SystemdCgroup = true
+    EOF
+    
+    # Restart containerd
+    sudo systemctl restart containerd
+    
+    # Verify
+    runsc --version
+    crictl info | grep -A5 runsc
+    ```
+    
+    ## Option 2: Via Rancher Desktop UI
+    - Settings → Kubernetes → Container Runtime → containerd
+    - Add RuntimeClass: gvisor (handler: runsc)
+    
+    ## Verify in Kubernetes
+    ```bash
+    kubectl get runtimeclass gvisor
+    kubectl run test-gvisor --image=nginx --runtime-class=gvisor --rm -it -- sh
+    ```

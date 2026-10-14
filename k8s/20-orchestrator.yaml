@@ -1,0 +1,141 @@
+# Orchestrator Deployment
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orchestrator-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orchestrator
+  namespace: orchestrator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: orchestrator-role
+  namespace: orchestrator-system
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/exec", "pods/log"]
+  verbs: ["get", "list", "create"]
+- apiGroups: ["agents.x-k8s.io"]
+  resources: ["sandboxes", "sandboxes/status"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["extensions.agents.x-k8s.io"]
+  resources: ["sandboxclaims", "sandboxclaims/status", "sandboxwarmpools", "sandboxwarmpools/status"]
+  verbs: ["get", "list", "watch", "create", "delete", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: orchestrator-default-role
+  namespace: default
+rules:
+- apiGroups: ["extensions.agents.x-k8s.io"]
+  resources: ["sandboxclaims", "sandboxclaims/status"]
+  verbs: ["get", "list", "watch", "create", "delete", "patch"]
+- apiGroups: ["agents.x-k8s.io"]
+  resources: ["sandboxes", "sandboxes/status"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods", "pods/exec", "pods/log"]
+  verbs: ["get", "list", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orchestrator-default-rolebinding
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: orchestrator-default-role
+subjects:
+- kind: ServiceAccount
+  name: orchestrator
+  namespace: orchestrator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orchestrator-rolebinding
+  namespace: orchestrator-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: orchestrator-role
+subjects:
+- kind: ServiceAccount
+  name: orchestrator
+  namespace: orchestrator-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: orchestrator-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orchestrator
+  template:
+    metadata:
+      labels:
+        app: orchestrator
+    spec:
+      serviceAccountName: orchestrator
+      containers:
+      - name: orchestrator
+        image: orchestrator:local
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8080
+        env:
+        - name: KUBECONFIG_PATH
+          value: ""
+        - name: NAMESPACE
+          value: "default"
+        - name: WARM_POOL_NAME
+          value: "agent-warm-pool"
+        - name: SANDBOX_TEMPLATE_NAME
+          value: "agent-sandbox-template"
+        - name: DEFAULT_TTL_SECONDS
+          value: "3600"
+        - name: MAX_CONCURRENT_SESSIONS
+          value: "5"
+        - name: ORCHESTRATOR_PORT
+          value: "8080"
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator
+  namespace: orchestrator-system
+spec:
+  selector:
+    app: orchestrator
+  ports:
+  - port: 8080
+    targetPort: 8080
+  type: ClusterIP

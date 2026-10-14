@@ -1,0 +1,136 @@
+# PostgreSQL for session metadata, audit logs, and checkpoint metadata
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: postgres
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-credentials
+  namespace: postgres
+type: Opaque
+stringData:
+  POSTGRES_USER: "orchestrator"
+  POSTGRES_PASSWORD: "changeme123"
+  POSTGRES_DB: "agent_sandbox"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:16-alpine
+        envFrom:
+        - secretRef:
+            name: postgres-credentials
+        ports:
+        - containerPort: 5432
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+        - name: init-sql
+          mountPath: /docker-entrypoint-initdb.d
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+        livenessProbe:
+          exec:
+            command: ["pg_isready", "-U", "orchestrator"]
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command: ["pg_isready", "-U", "orchestrator"]
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: data
+        emptyDir: {}  # Use PVC in production
+      - name: init-sql
+        configMap:
+          name: postgres-init
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: postgres
+data:
+  01-schema.sql: |
+    -- Sessions table
+    CREATE TABLE IF NOT EXISTS sessions (
+        id VARCHAR(16) PRIMARY KEY,
+        task_name VARCHAR(255) NOT NULL,
+        task_description TEXT,
+        repo_url TEXT,
+        repo_branch VARCHAR(100) DEFAULT 'main',
+        commands JSONB DEFAULT '[]'::jsonb,
+        env_vars JSONB DEFAULT '{}'::jsonb,
+        timeout_seconds INTEGER DEFAULT 600,
+        auto_release BOOLEAN DEFAULT FALSE,
+        status VARCHAR(50) NOT NULL DEFAULT 'pending',
+        sandbox_name VARCHAR(100),
+        claim_name VARCHAR(100),
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        started_at TIMESTAMPTZ,
+        completed_at TIMESTAMPTZ,
+        result JSONB,
+        error TEXT,
+        checkpoint_data JSONB,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    
+    CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+    CREATE INDEX IF NOT EXISTS idx_sessions_created_at ON sessions(created_at);
+    
+    -- Sandbox claims audit
+    CREATE TABLE IF NOT EXISTS sandbox_claims (
+        id SERIAL PRIMARY KEY,
+        session_id VARCHAR(16) REFERENCES sessions(id),
+        claim_name VARCHAR(100) NOT NULL,
+        sandbox_name VARCHAR(100) NOT NULL,
+        warm_pool_name VARCHAR(100) NOT NULL,
+        claimed_at TIMESTAMPTZ DEFAULT NOW(),
+        released_at TIMESTAMPTZ,
+        status VARCHAR(50) NOT NULL
+    );
+    
+    -- Checkpoints
+    CREATE TABLE IF NOT EXISTS checkpoints (
+        id SERIAL PRIMARY KEY,
+        session_id VARCHAR(16) REFERENCES sessions(id),
+        checkpoint_type VARCHAR(50) NOT NULL, -- 'periodic', 'manual', 'pre-release'
+        data JSONB NOT NULL,
+        s3_path TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+  clusterIP: None

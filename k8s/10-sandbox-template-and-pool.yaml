@@ -1,0 +1,64 @@
+# SandboxTemplate for AI agent execution
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: agent-sandbox-template
+  namespace: default
+spec:
+  podTemplate:
+    spec:
+      # Runtime class for gVisor (uncomment after installing gVisor)
+      # runtimeClassName: gvisor
+      securityContext:
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        runAsNonRoot: true
+      restartPolicy: "OnFailure"
+      containers:
+      - name: agent-sandbox
+        image: sandbox-base:local
+        imagePullPolicy: Never
+        command: ["/bin/sh", "-c", "sleep infinity"]
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+            ephemeral-storage: "500Mi"
+          limits:
+            cpu: "2000m"
+            memory: "4Gi"
+            ephemeral-storage: "4Gi"
+        env:
+        - name: HOME
+          value: "/home/agent"
+        - name: WORKSPACE_DIR
+          value: "/workspace"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: cache
+          mountPath: /home/agent/.cache
+      volumes:
+      - name: workspace
+        emptyDir:
+          sizeLimit: 2Gi
+      - name: cache
+        emptyDir:
+          sizeLimit: 500Mi
+  volumeClaimTemplatesPolicy: Disallowed
+---
+# SandboxWarmPool - keeps pre-warmed sandboxes ready for instant allocation
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxWarmPool
+metadata:
+  name: agent-warm-pool
+  namespace: default
+spec:
+  updateStrategy:
+    type: Recreate
+  replicas: 3
+  sandboxTemplateRef:
+    name: agent-sandbox-template
